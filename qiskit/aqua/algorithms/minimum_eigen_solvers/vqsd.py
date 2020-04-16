@@ -26,14 +26,14 @@ from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.providers import BaseBackend
 from qiskit.aqua import QuantumInstance, AquaError
-from qiskit.aqua.utils.backend_utils import (is_statevector_backend,
-                                             is_aer_provider)
+from qiskit.aqua.utils.backend_utils import is_aer_provider
 from qiskit.aqua.operators import BaseOperator
 from qiskit.aqua.components.optimizers import Optimizer, SLSQP
 from qiskit.aqua.components.variational_forms import VariationalForm, RY
 from qiskit.aqua.components.initial_states import InitialState
 from qiskit.aqua.utils.validation import validate_min, validate_range
 from qiskit.aqua.utils.run_circuits import find_regs_by_name
+from qiskit.quantum_info.states import Statevector
 from qiskit.quantum_info import DensityMatrix
 # TODO : Fix temporary solution for path related issues
 from vq_algorithm import VQAlgorithm, VQResult
@@ -41,8 +41,40 @@ from minimum_eigen_solver import MinimumEigensolver, MinimumEigensolverResult
 
 logger = logging.getLogger(__name__)
 
+# disable check for var_forms, optimizer setter because of pylint bug
+# pylint: disable=no-member
+
 
 class VQSD(VQAlgorithm, MinimumEigensolver):
+    r"""
+    The Variational Quantum Eigensolver algorithm.
+    `VQE <https://arxiv.org/abs/1304.3061>`__ is a hybrid algorithm that uses a
+    variational technique and interleaves quantum and classical computations in order to find
+    the minimum eigenvalue of the Hamiltonian :math:`H` of a given system.
+    An instance of VQE requires defining two algorithmic sub-components:
+    a trial state (ansatz) from Aqua's :mod:`~qiskit.aqua.components.variational_forms`, and one
+    of the classical :mod:`~qiskit.aqua.components.optimizers`. The ansatz is varied, via its set
+    of parameters, by the optimizer, such that it works towards a state, as determined by the
+    parameters applied to the variational form, that will result in the minimum expectation value
+    being measured of the input operator (Hamiltonian).
+    An optional array of parameter values, via the *initial_point*, may be provided as the
+    starting point for the search of the minimum eigenvalue. This feature is particularly useful
+    such as when there are reasons to believe that the solution point is close to a particular
+    point.  As an example, when building the dissociation profile of a molecule,
+    it is likely that using the previous computed optimal solution as the starting
+    initial point for the next interatomic distance is going to reduce the number of iterations
+    necessary for the variational algorithm to converge.  Aqua provides an
+    `initial point tutorial <https://github.com/Qiskit/qiskit-tutorials-community/blob/master
+    /chemistry/h2_vqe_initial_point.ipynb>`__ detailing this use case.
+    The length of the *initial_point* list value must match the number of the parameters
+    expected by the variational form being used. If the *initial_point* is left at the default
+    of ``None``, then VQE will look to the variational form for a preferred value, based on its
+    given initial state. If the variational form returns ``None``,
+    then a random point will be generated within the parameter bounds set, as per above.
+    If the variational form provides ``None`` as the lower bound, then VQE
+    will default it to :math:`-2\pi`; similarly, if the variational form returns ``None``
+    as the upper bound, the default value will be :math:`2\pi`.
+    """
     def __init__(self,
                  initial_state: InitialState,
                  operator: Optional[BaseOperator] = None,
@@ -234,14 +266,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         ret += "===============================================================\n"
         return ret
 
-    # TODO
-    def _config_the_best_mode(self, operator, backend):
-        pass
-
     def compute_minimum_eigenvalue(
             self, operator: Optional[BaseOperator] = None,
             aux_operators: Optional[List[BaseOperator]] = None) -> MinimumEigensolverResult:
-
         super().compute_minimum_eigenvalue(operator, aux_operators)
         return self._run()
 
@@ -257,16 +284,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             AquaError: wrong setting of operator and backend.
         """
         if self.initial_state is None:
-            raise AquaError("Operator was never provided")
+            raise AquaError("Initial state was never provided")
 
         self._initial_state = self.initial_state
-
-        # TODO : Statevector implemetation
-        # Keywords : Locally dephasing, global phasing, Hilbert-Schmidt distance
-        if self._quantum_instance.is_statevector:
-            raise AquaError("Statevector simulator is not currently "
-                            "supported")
-
         self._use_simulator_snapshot_mode = (
             is_aer_provider(self._quantum_instance.backend)
             and self._quantum_instance.run_config.shots == 1
@@ -327,10 +347,16 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         circuit = QuantumCircuit(qreg)
         circuit.append(initial_state_circuit, qreg)
         circuit.append(opt_ansatz_circuit, qreg[:num_working_qubits])
-
         return circuit
 
     def get_optimal_vector(self):
+        """
+        Construct the eigenvector estimates of the now approximately
+        diagonalized density matrix
+
+        Returns:
+            numpy.ndarray: An array of the eigenvector estimates
+        """
         # pylint: disable=import-outside-toplevel
         from qiskit import execute, BasicAer
 
@@ -355,7 +381,6 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             backend = BasicAer.get_backend('statevector_simulator')
             eigvec = execute(circuit, backend).result().get_statevector(circuit)
             eigvecs.append(eigvec)
-
         return np.array(eigvecs)
 
     def get_optimal_eigenvalues(self):
@@ -366,16 +391,15 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             raise AquaError("Cannot find optimal vector before running the "
                             "algorithm to find optimal params.")
 
-        num_qubits = self._initial_state._num_qubits
         num_working_qubits = self._num_working_qubits
         circuit = self.get_optimal_circuit()
 
         counts = None
-        eigvals = []
 
         if self._quantum_instance.is_statevector:
             ret = self._quantum_instance.execute(circuit)
-            counts = ret.get_statevector(circuit).to_counts()
+            state_vec = Statevector(ret.get_statevector(circuit))
+            counts = state_vec.probabilities_dict()
         else:
             c = ClassicalRegister(circuit.width(), name='c')
             q = find_regs_by_name(circuit, 'q')
@@ -385,19 +409,13 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             ret = self._quantum_instance.execute(circuit)
             counts = ret.get_counts(circuit)
 
-        all_keys = list(itertools.product(['0', '1'],
-                                          repeat=num_qubits))
         keys = counts.keys()
         num_shots = sum(counts.values())
+        eigvals = np.array([counts[key] / num_shots for key in keys])
 
-        for tup in all_keys:
-            key = ''.join(tup)
-            if key not in keys:
-                eigvals.append(0.0)
-            else:
-                eigvals.append(counts[key] / num_shots)
-
-        return np.array(eigvals)
+        # sort eigenvalues in descending order
+        idx = np.argsort(-eigvals)
+        return eigvals[idx[:2**num_working_qubits]]
 
     @property
     def optimal_params(self):
@@ -410,21 +428,30 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                    swap_qubit_idx,
                    circuit_name_prefix=''):
         """
-        Docstring
+        Performs the PDIP Test on a circuit composed of the initial state and
+        a parameterized ansatz.
+
+        Args:
+            parameter (numpy.ndarray): parameters for variational form.
+            dip_qubit_idx (numpy.ndarray): indices of qubits on which the DIP
+                Test is performed
+            swap_qubit_idx (numpy.ndarray): indices of qubits on which the SWAP
+                Test is performed
+            circuit_name_prefix (str, optional): a prefixe of circuit name
+        Returns:
+            QuantumCircuit: Generated circuit
         """
-        num_qubits = self._initial_state._num_qubits
+        initial_state = self._initial_state
+        num_qubits = initial_state._num_qubits
         num_working_qubits = self._num_working_qubits
 
         qreg = QuantumRegister(2 * num_qubits, name='pdip_qreg')
         circuit_name = "{}_pdip_test".format(circuit_name_prefix)
-
-        circuit = QuantumCircuit(qreg,
-                                 name=circuit_name)
-
+        circuit = QuantumCircuit(qreg, name=circuit_name)
         pdip_circuit = VQSD._pdip_circuit(num_working_qubits,
                                           dip_qubit_idx, swap_qubit_idx)
 
-        initial_state_circuit = self._initial_state.construct_circuit(mode="circuit")
+        initial_state_circuit = initial_state.construct_circuit(mode="circuit")
         ansatz_circuit = self._var_form.construct_circuit(parameter)
 
         # two copies of initial state
@@ -437,12 +464,18 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         circuit.append(pdip_circuit, qreg[:num_working_qubits] +
                        qreg[num_qubits:num_qubits+num_working_qubits])
-
         return circuit
 
     def _dip_test(self, parameter, circuit_name_prefix=''):
         """
-        Docstring
+        Performs the PDIP Test on a circuit composed of the initial state and
+        a parameterized ansatz.
+        Args:
+
+            parameter (numpy.ndarray): parameters for variational form.
+            circuit_name_prefix (str, optional): a prefix of circuit name
+        Returns:
+            QuantumCircuit: Generated circuit
         """
         num_qubits = self._initial_state._num_qubits
         num_working_qubits = self._num_working_qubits
@@ -519,7 +552,16 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             circuits.append(pdip_test)
         return circuits
 
+    # This is the objective function to be passed to the optimizer that is
+    # used for evaluation
     def _cost_evaluation(self, parameters):
+        """
+        Evaluate cost function at given parameters for the variational form.
+        Args:
+            parameters (numpy.ndarray): parameters for variational form.
+        Returns:
+            Union(float, list[float]): cost objective function value of each parameter.
+        """
         num_parameter_sets = len(parameters) // self._var_form.num_parameters
         parameter_sets = np.split(parameters, num_parameter_sets)
         global_objs = []
@@ -565,6 +607,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                                                 is not None)
 
         for idx, _ in enumerate(parameter_sets):
+            # Evaluate with result
             circuits = list(filter(lambda circ:
                                    circ.name.startswith('{}_'.format(idx)),
                                    to_be_simulated_circuits))
@@ -576,9 +619,19 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             pdip_test_circuits = circuits[1:]
 
             # evaluate with results
-            dip_test_counts = result.get_counts(dip_test_circuit)
-            pdip_test_counts = [result.get_counts(circ) for circ in
-                                pdip_test_circuits]
+            dip_test_counts = None
+            pdip_test_counts = None
+            if self._quantum_instance.is_statevector:
+                np_state_vec = result.get_statevector(dip_test_circuit)
+                dip_test_state_vec = Statevector(np_state_vec)
+                dip_test_counts = dip_test_state_vec.probabilities_dict()
+                pdip_test_counts = \
+                    [Statevector(result.get_statevector(circ)).probabilities_dict()
+                     for circ in pdip_test_circuits]
+            else:
+                dip_test_counts = result.get_counts(dip_test_circuit)
+                pdip_test_counts = [result.get_counts(circ) for circ in
+                                    pdip_test_circuits]
 
             obj_global = self._dip_test_post_process(dip_test_counts)
             obj_local = self._pdip_test_post_process(pdip_test_counts)
@@ -599,7 +652,8 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             # of the evaluation time has to be done more carefully,
             # therefore we do not calculate it
             if len(parameter_sets) == 1:
-                logger.info('Cost function evaluation %s returned %s - %.5f (ms)',
+                logger.info('Cost function evaluation %s '
+                            'returned %s - %.5f (ms)',
                             self._eval_count,
                             np.real(obj_weigthed),
                             (end_time - start_time) * 1000)
@@ -607,8 +661,8 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                 logger.info('Cost function evaluation %s returned %s',
                             self._eval_count,
                             np.real(obj_weigthed))
-
-            return weighted_objs if len(weighted_objs) > 1 else weighted_objs[0]
+            return weighted_objs if len(weighted_objs) > 1 \
+                                    else weighted_objs[0]
 
     def _dip_test_post_process(self, counts):
         """
@@ -616,10 +670,12 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         by the DIP Test
 
         Args:
-            counts (dict) : Dictionary of counts from the DIP Test
-
+            counts (dict) : dictionary of counts from the DIP Test
         Returns:
             float: C1 from the paper
+        Raises:
+            AquaError: probabilities are always positive and less than
+            or equal to 1.0
         """
 
         initial_state_purity = self._purity
@@ -643,10 +699,12 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         the Partial DIP Test.
 
         Args:
-            counts (dict): Dictionary of counts
-
+            counts (dict): dictionary of counts
         Returns:
             float: C2 from the paper
+        Raises:
+            AquaError: probabilities are always positive and less than
+            or equal to 1.0
         """
 
         initial_state_purity = self._purity
@@ -666,9 +724,21 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                         new_dict[k] = c[k]
             return new_dict
 
-        def _state_overlap_post_process(counts, num_qubits,
-                                        num_shots, skip_idx=[]):
-            """State overlap post processing"""
+        def _state_overlap_post_process(counts, skip_idx=None):
+            """
+            State overlap post processing
+
+            Args:
+                counts (dict): dictionary of counts
+                num_qubits (int): number of qubits
+                skip_idx (list, optional): qubit indices to skip
+            Returns:
+                int: value of state overlap
+            """
+
+            # number of qubits and number of shots
+            keys, vals = counts.keys(), counts.values()
+            num_qubits, num_shots = len(list(keys)[0]), sum(list(vals))
 
             # sanity check
             if not num_qubits % 2 == 0:
@@ -677,7 +747,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             # Compute expectation value of controlled Z operation
             overlap = 0.0
             shift = num_qubits // 2
-            keys = counts.keys()
+            skip_idx = skip_idx if skip_idx is not None else []
             for key in keys:
                 parity = 1
                 # skip dip qubits and ancillary qubits indices.
@@ -692,10 +762,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         scaled_overlap = 0.0
         for idx, cur in enumerate(counts):
             pdip_count = get_pdip_zero_outcome(cur, idx)
-            overlap = _state_overlap_post_process(pdip_count,
-                                                  num_qubits,
-                                                  num_shots,
-                                                  skip_idx=[idx])
+            overlap = _state_overlap_post_process(pdip_count, skip_idx=[idx])
             # probability of all zero outcome
             all_zero_outcome = '0' * 2 * num_qubits
             prob = pdip_count[all_zero_outcome] / num_shots \
@@ -731,13 +798,13 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         initial state
 
         Args:
-            num_qubits (int): Number of qubits in a single copy of the
+            num_qubits (int): number of qubits in a single copy of the
                 initial state
-            dip_qubit_idx (numpy.ndarray): List of qubit indices (j in the paper)
-                to do the pdip test on.
-            swap_qubit_idx (numpy.ndarray): List of qubit indices (j in the paper)
-                to do the pdip test on.
-        Returns
+            dip_qubit_idx (list): list of qubit indices (j in the paper)
+                to do the dip test on
+            swap_qubit_idx (list): list of qubit indices (j in the paper)
+                to do the swap test on.
+        Returns:
             QuantumCircuit: Generated circuit
         """
 
@@ -770,7 +837,6 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             pdip_circuit.append(swap_circuit, swap_qubit_idx)
         dip_circuit = VQSD._dip_circuit(ndip)
         pdip_circuit.append(dip_circuit, dip_qubit_idx)
-
         return pdip_circuit
 
 
@@ -798,21 +864,3 @@ class VQSDResult(VQResult, MinimumEigensolverResult):
             return VQResult.__getitem__(self, key)
         except KeyError:
             return MinimumEigensolverResult.__getitem__(self, key)
-
-
-if __name__ == '__main__':
-    from qiskit.quantum_info.states import Statevector
-    from qiskit.aqua.components.initial_states import Custom
-    from qiskit.aqua.components.optimizers import COBYLA
-    from qiskit import Aer
-
-    state_vector = np.sqrt(1/2) * (Statevector.from_label('0+') +
-                                   Statevector.from_label('1-'))
-    initial_state = Custom(state_vector.num_qubits,
-                           state_vector=state_vector.data)
-
-    vqsd_obj = VQSD(initial_state, num_ancillae=1,
-                    quantum_instance=Aer.get_backend("qasm_simulator"),
-                    optimizer=COBYLA())
-    result = vqsd_obj.run(shots=8100)
-    print(result)
