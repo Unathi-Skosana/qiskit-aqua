@@ -16,9 +16,9 @@
 
 from typing import Optional, List, Callable, Union
 from time import time
+from itertools import product
 import logging
 import functools
-import itertools
 import warnings
 import numpy as np
 
@@ -320,8 +320,8 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         result = VQSDResult()
         result.combine(vqresult)
-        result.eigenvalue = self.get_optimal_eigenvalues()
-        result.eigenstate = self.get_optimal_vector()
+        result.eigenvalues = self.get_optimal_eigenvalues()
+        result.eigenstates = self.get_optimal_vector()
         result.cost_function_evals = self._eval_count
 
         self.cleanup_parameterized_circuits()
@@ -358,18 +358,21 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             numpy.ndarray: An array of the eigenvector estimates
         """
         # pylint: disable=import-outside-toplevel
-        from qiskit import execute, BasicAer
+        from qiskit import execute, Aer
 
         if 'opt_params' not in self._ret:
             raise AquaError("Cannot find optimal eigenvectors before running the "
                             "algorithm to find optimal params.")
 
+        # TODO: Find a way to sort the eigenvectors according to their
+        # eigenvalues
         num_working_qubits = self._num_working_qubits
         opt_ansatz_circuit = self._var_form.construct_circuit(self._ret['opt_params'])
-        eigvecs = []
-
-        keys = list(itertools.product(['0', '1'],
+        keys = list(product(['0', '1'],
                                       repeat=num_working_qubits))
+
+        eigvecs = np.zeros((len(keys), 2**num_working_qubits), dtype='complex')
+        j = 0
         for key in keys:
             qreg = QuantumRegister(num_working_qubits)
             circuit = QuantumCircuit(qreg)
@@ -378,10 +381,11 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                     circuit.x(i)
             circuit.append(opt_ansatz_circuit.inverse(), qreg)
 
-            backend = BasicAer.get_backend('statevector_simulator')
+            backend = Aer.get_backend('statevector_simulator')
             eigvec = execute(circuit, backend).result().get_statevector(circuit)
-            eigvecs.append(eigvec)
-        return np.array(eigvecs)
+            eigvecs[j] = eigvec
+            j += 1
+        return eigvecs
 
     def get_optimal_eigenvalues(self):
         """
@@ -391,9 +395,10 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             raise AquaError("Cannot find optimal vector before running the "
                             "algorithm to find optimal params.")
 
+        # TODO : Find better way to do this
+        num_qubits = self._initial_state._num_qubits
         num_working_qubits = self._num_working_qubits
         circuit = self.get_optimal_circuit()
-
         counts = None
 
         if self._quantum_instance.is_statevector:
@@ -409,10 +414,16 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             ret = self._quantum_instance.execute(circuit)
             counts = ret.get_counts(circuit)
 
+        all_keys = list(product(['0', '1'], repeat=num_qubits))
+        eigvals = np.zeros(len(all_keys))
         keys = counts.keys()
         num_shots = sum(counts.values())
-        eigvals = np.array([counts[key] / num_shots for key in keys])
-
+        j = 0
+        for key in all_keys:
+            k = ''.join(key)
+            if k in keys:
+                eigvals[j] = counts[k] / num_shots
+                j += 1
         # sort eigenvalues in descending order
         idx = np.argsort(-eigvals)
         return eigvals[idx[:2**num_working_qubits]]
@@ -684,7 +695,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         all_zero_outcome_key = '0' * num_working_qubits
         all_zero_outcomes = {key: value for (key, value) in counts.items()
-                             if key[-1-num_working_qubits:] ==
+                             if key[-num_working_qubits:] ==
                              all_zero_outcome_key}
 
         prob = sum(all_zero_outcomes.values()) / num_shots
