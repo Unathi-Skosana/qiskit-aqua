@@ -78,7 +78,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
     def __init__(self,
                  initial_state: InitialState,
                  operator: Optional[BaseOperator] = None,
-                 q: Optional[float] = 0,
+                 q: Optional[float] = 0.5,
                  num_ancillae: Optional[int] = 0,
                  var_form: Optional[VariationalForm] = None,
                  optimizer: Optional[Optimizer] = None,
@@ -152,7 +152,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         self._use_simulator_snapshot_mode = None
         self._ret = None
         self._eval_time = None
-        self._eval_count = -1
+        self._eval_count = 0
 
         logger.info(self.print_settings())
         self._var_form_params = None
@@ -279,7 +279,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         """
         Run the algorithm to compute the minimum eigenvalue.
         Returns:
-            dict: Dictionary of results
+            dict: dictionary of results
         Raises:
             AquaError: wrong setting of operator and backend.
         """
@@ -351,11 +351,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
     def get_optimal_vector(self):
         """
-        Construct the eigenvector estimates of the now approximately
-        diagonalized density matrix
-
+        Computes the eigenvectors estimates of the initial state
         Returns:
-            numpy.ndarray: An array of the eigenvector estimates
+            numpy.ndarray: array of the eigenvector estimates
         """
         # pylint: disable=import-outside-toplevel
         from qiskit import execute, Aer
@@ -369,7 +367,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         num_working_qubits = self._num_working_qubits
         opt_ansatz_circuit = self._var_form.construct_circuit(self._ret['opt_params'])
         keys = list(product(['0', '1'],
-                                      repeat=num_working_qubits))
+                            repeat=num_working_qubits))
 
         eigvecs = np.zeros((len(keys), 2**num_working_qubits), dtype='complex')
         j = 0
@@ -379,10 +377,11 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             for i in range(num_working_qubits):
                 if key[i] == '1':
                     circuit.x(i)
-            circuit.append(opt_ansatz_circuit.inverse(), qreg)
 
+            circuit.append(opt_ansatz_circuit.inverse(), qreg)
             backend = Aer.get_backend('statevector_simulator')
-            eigvec = execute(circuit, backend).result().get_statevector(circuit)
+            result = execute(circuit, backend).result()
+            eigvec = result.get_statevector(circuit)
             eigvecs[j] = eigvec
             j += 1
         return eigvecs
@@ -390,13 +389,14 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
     def get_optimal_eigenvalues(self):
         """
         Computes the eigenvalue estimates of the initial state
+        Returns:
+            numpy.ndarray: array of eigenvalues estimates
         """
         if 'opt_params' not in self._ret:
             raise AquaError("Cannot find optimal vector before running the "
                             "algorithm to find optimal params.")
 
         # TODO : Find better way to do this
-        num_qubits = self._initial_state._num_qubits
         num_working_qubits = self._num_working_qubits
         circuit = self.get_optimal_circuit()
         counts = None
@@ -414,19 +414,17 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             ret = self._quantum_instance.execute(circuit)
             counts = ret.get_counts(circuit)
 
-        all_keys = list(product(['0', '1'], repeat=num_qubits))
-        eigvals = np.zeros(len(all_keys))
-        keys = counts.keys()
+        keys = list(map(''.join, product(['0', '1'],
+                                         repeat=num_working_qubits)))
         num_shots = sum(counts.values())
-        j = 0
-        for key in all_keys:
-            k = ''.join(key)
-            if k in keys:
-                eigvals[j] = counts[k] / num_shots
-                j += 1
-        # sort eigenvalues in descending order
+        probs = dict.fromkeys(keys, 0.0)
+
+        for i, (k, v) in enumerate(counts.items()):
+            probs[k[-num_working_qubits:]] += v / num_shots
+
+        eigvals = np.array(list(probs.values()))
         idx = np.argsort(-eigvals)
-        return eigvals[idx[:2**num_working_qubits]]
+        return eigvals[idx]
 
     @property
     def optimal_params(self):
@@ -439,15 +437,14 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                    swap_qubit_idx,
                    circuit_name_prefix=''):
         """
-        Performs the PDIP Test on a circuit composed of the initial state and
+        Performs the PDIP test on a circuit composed of the initial state and
         a parameterized ansatz.
-
         Args:
             parameter (numpy.ndarray): parameters for variational form.
             dip_qubit_idx (numpy.ndarray): indices of qubits on which the DIP
-                Test is performed
+                test is performed
             swap_qubit_idx (numpy.ndarray): indices of qubits on which the SWAP
-                Test is performed
+                test is performed
             circuit_name_prefix (str, optional): a prefixe of circuit name
         Returns:
             QuantumCircuit: Generated circuit
@@ -465,13 +462,12 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         initial_state_circuit = initial_state.construct_circuit(mode="circuit")
         ansatz_circuit = self._var_form.construct_circuit(parameter)
 
-        # two copies of initial state
         circuit.append(initial_state_circuit, qreg[:num_qubits])
         circuit.append(initial_state_circuit, qreg[num_qubits:])
 
-        # two copies of ansatz
         circuit.append(ansatz_circuit, qreg[:num_working_qubits])
-        circuit.append(ansatz_circuit, qreg[num_qubits:num_qubits + num_working_qubits])
+        circuit.append(ansatz_circuit, qreg[num_qubits:num_qubits +
+                                            num_working_qubits])
 
         circuit.append(pdip_circuit, qreg[:num_working_qubits] +
                        qreg[num_qubits:num_qubits+num_working_qubits])
@@ -479,10 +475,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
     def _dip_test(self, parameter, circuit_name_prefix=''):
         """
-        Performs the PDIP Test on a circuit composed of the initial state and
+        Performs the DIP test on a circuit composed of the initial state and
         a parameterized ansatz.
         Args:
-
             parameter (numpy.ndarray): parameters for variational form.
             circuit_name_prefix (str, optional): a prefix of circuit name
         Returns:
@@ -499,13 +494,12 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         initial_state_circuit = self._initial_state.construct_circuit(mode="circuit")
         ansatz_circuit = self._var_form.construct_circuit(parameter)
 
-        # two copies of initial state
         circuit.append(initial_state_circuit, qreg[:num_qubits])
         circuit.append(initial_state_circuit, qreg[num_qubits:])
 
-        # two copies of ansatz
         circuit.append(ansatz_circuit, qreg[:num_working_qubits])
-        circuit.append(ansatz_circuit, qreg[num_qubits:num_qubits + num_working_qubits])
+        circuit.append(ansatz_circuit, qreg[num_qubits:num_qubits +
+                                            num_working_qubits])
 
         circuit.append(dip_circuit, qreg[:num_working_qubits] +
                        qreg[num_qubits:num_qubits + num_working_qubits])
@@ -530,23 +524,24 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         if self._initial_state is None:
             raise AquaError("Initial state was never provided")
 
-        num_working_qubits = self._num_working_qubits
-
         circuits = []
         dip_test = self._dip_test(parameter, circuit_name_prefix=circuit_name_prefix)
+        num_working_qubits = self._num_working_qubits
 
         if not statevector_mode:
             creg = ClassicalRegister(dip_test.width(), name="dip_creg")
             qreg = find_regs_by_name(dip_test, 'dip_qreg')
             dip_test.add_register(creg)
             dip_test.barrier(qreg)
-            dip_test.measure(qreg[:num_working_qubits], creg[:num_working_qubits])
+            dip_test.measure(qreg[:num_working_qubits],
+                             creg[:num_working_qubits])
         circuits.append(dip_test)
 
         for i in range(self._num_working_qubits):
             # get relevant qubit indices
             dip_qubit_idx = [i]
-            swap_qubit_idx = list(set(range(num_working_qubits)) - set(dip_qubit_idx))
+            swap_qubit_idx = list(set(range(num_working_qubits)) -
+                                  set(dip_qubit_idx))
             swap_qubit_idx += [i + num_working_qubits for i in swap_qubit_idx]
             dip_qubit_idx += [i + num_working_qubits for i in dip_qubit_idx]
             pdip_test = self._pdip_test(parameter,
@@ -623,7 +618,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                                    circ.name.startswith('{}_'.format(idx)),
                                    to_be_simulated_circuits))
 
-            # DIP Test circuits
+            # DIP test circuits
             dip_test_circuit = circuits[0]
 
             # PDIP circuits
@@ -677,11 +672,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
     def _dip_test_post_process(self, counts):
         """
-        Computes the objective function of the resolved circuit as computed
-        by the DIP Test
-
+        Computes the objective function of the resolved DIP test circuit
         Args:
-            counts (dict) : dictionary of counts from the DIP Test
+            counts (dict) : dictionary of counts from the DIP test
         Returns:
             float: C1 from the paper
         Raises:
@@ -692,7 +685,6 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         initial_state_purity = self._purity
         num_shots = self._quantum_instance._run_config.shots
         num_working_qubits = self._num_working_qubits
-
         all_zero_outcome_key = '0' * num_working_qubits
         all_zero_outcomes = {key: value for (key, value) in counts.items()
                              if key[-num_working_qubits:] ==
@@ -706,9 +698,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
     def _pdip_test_post_process(self, counts):
         """
-        Computes the objective function of the resolved circuit as computed by
-        the Partial DIP Test.
-
+        Computes the objective function of the resolved PDIP test circuit
         Args:
             counts (dict): dictionary of counts
         Returns:
@@ -726,7 +716,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
         def get_pdip_zero_outcome(c, j):
             """Gets a dictionary of counts where the DIP test outcomes
                 were zero"""
-            new_dict = {}
+            new_dict = dict()
             for k in c.keys():
                 if k[-1-j] == '0':
                     if k in new_dict.keys():
@@ -737,17 +727,17 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         def _state_overlap_post_process(counts, skip_idx=None):
             """
-            State overlap post processing
-
+            Computes state overlap Tr(ρσ) between the first and
+            second copies of the initial state.
             Args:
                 counts (dict): dictionary of counts
-                num_qubits (int): number of qubits
                 skip_idx (list, optional): qubit indices to skip
             Returns:
-                int: value of state overlap
+                float: value of state overlap
+            Raises:
+                AquaError: Total number of qubits is not even.
             """
 
-            # number of qubits and number of shots
             keys, vals = counts.keys(), counts.values()
             num_qubits, num_shots = len(list(keys)[0]), sum(list(vals))
 
@@ -755,7 +745,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             if not num_qubits % 2 == 0:
                 raise AquaError("Input is not a valid shape.")
 
-            # Compute expectation value of controlled Z operation
+            # p1p2...ps q1q2...q2s
+            # if pi == qi  pair = 1
+            # else pair = 0
             overlap = 0.0
             shift = num_qubits // 2
             skip_idx = skip_idx if skip_idx is not None else []
@@ -787,13 +779,12 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
     @staticmethod
     def _dip_circuit(num_qubits):
         """
-        Construct DIP Test over two copies of the initial state
-
+        Construct DIP test over two copies of the initial state
         Args:
-            num_qubits (int): Number of qubits in a single copy of the
+            num_qubits (int): number of qubits in a single copy of the
             initial state
         Returns:
-            QuantumCircuit: Generated circuit
+            QuantumCircuit: generated circuit
         """
 
         qreg = QuantumRegister(2 * num_qubits)
@@ -805,29 +796,28 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
     @staticmethod
     def _pdip_circuit(num_qubits, dip_qubit_idx, swap_qubit_idx):
         """
-        Implements the Partial DIP Test circuit over two copies of the
+        Constructs the PDIP test circuit over two copies of the
         initial state
-
         Args:
             num_qubits (int): number of qubits in a single copy of the
                 initial state
             dip_qubit_idx (list): list of qubit indices (j in the paper)
                 to do the dip test on
-            swap_qubit_idx (list): list of qubit indices (j in the paper)
-                to do the swap test on.
+            swap_qubit_idx (list): list of qubits indices to do the swap
+                test on
         Returns:
-            QuantumCircuit: Generated circuit
+            QuantumCircuit: generated circuit
         """
 
         def swap_circuit(num_qubits):
             """
-            Construct Destructive Swap Test over two copies of the initial state
-
+            Constructs the destructive swap test over two copies of the
+            initial state
             Args:
                 num_qubits (int): Number of qubits in a single copy of the
                     initial state
             Returns:
-                QuantumCircuit: Generated circuit
+                QuantumCircuit: generated circuit
             """
 
             qreg = QuantumRegister(2 * num_qubits)
@@ -839,7 +829,6 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         qreg = QuantumRegister(2 * num_qubits)
         pdip_circuit = QuantumCircuit(qreg)
-
         nswap = len(swap_qubit_idx) // 2
         ndip = len(dip_qubit_idx) // 2
 
