@@ -174,6 +174,7 @@ and its Python API to be installed. See the following for more information:
    QAOA
    QPEMinimumEigensolver
    VQE
+   VQSD
 
 """
 
@@ -190,7 +191,7 @@ from .distribution_learners import QGAN
 from .eigen_solvers import NumPyEigensolver, ExactEigensolver, EigensolverResult
 from .factorizers import Shor
 from .linear_solvers import HHL, NumPyLSsolver, ExactLSsolver
-from .minimum_eigen_solvers import (VQE, VQEResult, QAOA, IQPE, IQPEMinimumEigensolver, IQPEResult,
+from .minimum_eigen_solvers import (VQE, VQSD, VQEResult, QAOA, IQPE, IQPEMinimumEigensolver, IQPEResult,
                                     QPE, QPEMinimumEigensolver, QPEResult,
                                     ClassicalCPLEX, CPLEX_Ising, NumPyMinimumEigensolver,
                                     MinimumEigensolver, MinimumEigensolverResult)
@@ -201,6 +202,7 @@ __all__ = [
     'QuantumAlgorithm',
     'VQE',
     'VQEResult',
+    'VQSD',
     'QAOA',
     'VQC',
     'QGAN',

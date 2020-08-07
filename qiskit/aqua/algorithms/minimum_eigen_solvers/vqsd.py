@@ -35,9 +35,8 @@ from qiskit.aqua.utils.validation import validate_min, validate_range
 from qiskit.aqua.utils.run_circuits import find_regs_by_name
 from qiskit.quantum_info.states import Statevector
 from qiskit.quantum_info import DensityMatrix
-# TODO : Fix temporary solution for path related issues
-from vq_algorithm import VQAlgorithm, VQResult
-from minimum_eigen_solver import MinimumEigensolver, MinimumEigensolverResult
+from ..vq_algorithm import VQAlgorithm, VQResult
+from .minimum_eigen_solver import MinimumEigensolver, MinimumEigensolverResult
 
 logger = logging.getLogger(__name__)
 
@@ -46,34 +45,8 @@ logger = logging.getLogger(__name__)
 
 
 class VQSD(VQAlgorithm, MinimumEigensolver):
+    # TODO : VQSD description
     r"""
-    The Variational Quantum Eigensolver algorithm.
-    `VQE <https://arxiv.org/abs/1304.3061>`__ is a hybrid algorithm that uses a
-    variational technique and interleaves quantum and classical computations in order to find
-    the minimum eigenvalue of the Hamiltonian :math:`H` of a given system.
-    An instance of VQE requires defining two algorithmic sub-components:
-    a trial state (ansatz) from Aqua's :mod:`~qiskit.aqua.components.variational_forms`, and one
-    of the classical :mod:`~qiskit.aqua.components.optimizers`. The ansatz is varied, via its set
-    of parameters, by the optimizer, such that it works towards a state, as determined by the
-    parameters applied to the variational form, that will result in the minimum expectation value
-    being measured of the input operator (Hamiltonian).
-    An optional array of parameter values, via the *initial_point*, may be provided as the
-    starting point for the search of the minimum eigenvalue. This feature is particularly useful
-    such as when there are reasons to believe that the solution point is close to a particular
-    point.  As an example, when building the dissociation profile of a molecule,
-    it is likely that using the previous computed optimal solution as the starting
-    initial point for the next interatomic distance is going to reduce the number of iterations
-    necessary for the variational algorithm to converge.  Aqua provides an
-    `initial point tutorial <https://github.com/Qiskit/qiskit-tutorials-community/blob/master
-    /chemistry/h2_vqe_initial_point.ipynb>`__ detailing this use case.
-    The length of the *initial_point* list value must match the number of the parameters
-    expected by the variational form being used. If the *initial_point* is left at the default
-    of ``None``, then VQE will look to the variational form for a preferred value, based on its
-    given initial state. If the variational form returns ``None``,
-    then a random point will be generated within the parameter bounds set, as per above.
-    If the variational form provides ``None`` as the lower bound, then VQE
-    will default it to :math:`-2\pi`; similarly, if the variational form returns ``None``
-    as the upper bound, the default value will be :math:`2\pi`.
     """
     def __init__(self,
                  initial_state: InitialState,
@@ -315,14 +288,15 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                     self._eval_time, self._ret['opt_params'], self._eval_count)
         self._ret['eval_count'] = self._eval_count
 
-        self._ret['eigvals'] = self.get_optimal_eigenvalues()
-        self._ret['eigvecs'] = self.get_optimal_vector()
-
         result = VQSDResult()
         result.combine(vqresult)
-        result.eigenvalues = self.get_optimal_eigenvalues()
-        result.eigenstates = self.get_optimal_vector()
+        result.eigenvalue = self.get_optimal_value()
+        result.eigenstate = self.get_optimal_vector()
         result.cost_function_evals = self._eval_count
+
+        self._ret['energy'] = self.get_optimal_cost()
+        self._ret['eigvals'] = result.eigenvalue
+        self._ret['eigvecs'] = result.eigenstate
 
         self.cleanup_parameterized_circuits()
         return result
@@ -370,6 +344,7 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
                             repeat=num_working_qubits))
 
         eigvecs = np.zeros((len(keys), 2**num_working_qubits), dtype='complex')
+
         j = 0
         for key in keys:
             qreg = QuantumRegister(num_working_qubits)
@@ -384,9 +359,10 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
             eigvec = result.get_statevector(circuit)
             eigvecs[j] = eigvec
             j += 1
+
         return eigvecs
 
-    def get_optimal_eigenvalues(self):
+    def get_optimal_value(self):
         """
         Computes the eigenvalue estimates of the initial state
         Returns:
@@ -421,6 +397,9 @@ class VQSD(VQAlgorithm, MinimumEigensolver):
 
         for i, (k, v) in enumerate(counts.items()):
             probs[k[-num_working_qubits:]] += v / num_shots
+
+        print({k: v for k, v in sorted(probs.items(), key=lambda item:
+            -item[1])})
 
         eigvals = np.array(list(probs.values()))
         idx = np.argsort(-eigvals)
